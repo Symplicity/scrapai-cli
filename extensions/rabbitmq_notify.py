@@ -6,12 +6,13 @@ database are published, eliminating phantom messages from duplicates or
 failed inserts.
 
 Uses pika (synchronous AMQP client) since the signal fires from synchronous
-pipeline code. Connection is opened once at spider start and reused.
+pipeline code. Connection is opened once at spider start and reused, with
+automatic reconnection on failure.
 
-Enable in settings.py:
-    EXTENSIONS = {
-        "extensions.rabbitmq_notify.RabbitMQNotifyExtension": 500,
-    }
+Enable via environment variable:
+    RABBITMQ_URL=amqp://guest:guest@localhost:5672/
+
+The extension is auto-enabled in settings.py when RABBITMQ_URL is set.
 
 Required settings (or set via environment):
     RABBITMQ_URL            - AMQP connection URL (default: amqp://guest:guest@localhost:5672/)
@@ -22,6 +23,7 @@ Required settings (or set via environment):
 
 import json
 import logging
+import os
 from datetime import datetime
 
 from scrapy import signals
@@ -41,6 +43,8 @@ def _json_serializer(obj):
 class RabbitMQNotifyExtension:
     """Synchronous RabbitMQ extension that publishes committed items via pika."""
 
+    MAX_RECONNECT_ATTEMPTS = 3
+
     def __init__(self, amqp_url, exchange_name, routing_key, queue_name):
         self.amqp_url = amqp_url
         self.exchange_name = exchange_name
@@ -51,8 +55,6 @@ class RabbitMQNotifyExtension:
 
     @classmethod
     def from_crawler(cls, crawler):
-        import os
-
         ext = cls(
             amqp_url=crawler.settings.get(
                 "RABBITMQ_URL",
@@ -76,26 +78,42 @@ class RabbitMQNotifyExtension:
         crawler.signals.connect(ext.items_committed, signal=scrapai_signals.items_committed)
         return ext
 
-    def spider_opened(self, spider):
-        """Open a persistent connection and declare the queue on spider start."""
+    def _connect(self):
+        """Open connection and declare queue. Returns True on success."""
         import pika
 
         try:
             params = pika.URLParameters(self.amqp_url)
             self.connection = pika.BlockingConnection(params)
             self.channel = self.connection.channel()
-
-            # Declare queue (idempotent — creates if missing, no-op if exists)
             self.channel.queue_declare(queue=self.queue_name, durable=True)
-
-            logger.info(
-                f"RabbitMQ connected: queue={self.queue_name} "
-                f"routing_key={self.routing_key}"
-            )
+            return True
         except Exception as e:
             logger.error(f"RabbitMQ connection failed: {e}")
             self.connection = None
             self.channel = None
+            return False
+
+    def _ensure_connected(self):
+        """Reconnect if the connection is dead. Returns True if usable."""
+        if self.connection and self.connection.is_open:
+            return True
+
+        logger.warning("RabbitMQ connection lost, attempting reconnect...")
+        for attempt in range(1, self.MAX_RECONNECT_ATTEMPTS + 1):
+            if self._connect():
+                logger.info(f"RabbitMQ reconnected (attempt {attempt})")
+                return True
+            logger.warning(f"RabbitMQ reconnect attempt {attempt} failed")
+        return False
+
+    def spider_opened(self, spider):
+        """Open a persistent connection and declare the queue on spider start."""
+        if self._connect():
+            logger.info(
+                f"RabbitMQ connected: queue={self.queue_name} "
+                f"routing_key={self.routing_key}"
+            )
 
     def spider_closed(self, spider):
         """Gracefully close the RabbitMQ connection on spider shutdown."""
@@ -105,7 +123,10 @@ class RabbitMQNotifyExtension:
 
     def items_committed(self, items, spider):
         """Publish each committed item to RabbitMQ after DB write."""
-        if not self.channel:
+        if not self._ensure_connected():
+            logger.error(
+                f"RabbitMQ unavailable, dropping {len(items)} messages"
+            )
             return
 
         import pika
@@ -132,6 +153,13 @@ class RabbitMQNotifyExtension:
                 published += 1
             except Exception as e:
                 logger.warning(f"RabbitMQ publish failed for {item.get('url')}: {e}")
+                # Connection likely dead — try to reconnect for remaining items
+                if not self._ensure_connected():
+                    logger.error(
+                        f"RabbitMQ reconnect failed, dropping remaining "
+                        f"{len(items) - published} messages"
+                    )
+                    break
 
         if published:
             logger.info(f"Published {published} items to RabbitMQ")
