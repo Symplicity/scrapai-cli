@@ -198,15 +198,15 @@ class DatabasePipeline:
                 author=item.get("author"),
                 metadata_json=metadata,
             )
-            new_objects.append((item, db_item))
+            new_objects.append(db_item)
 
         # 3. Bulk Insert (with per-row fallback so one bad row doesn't drop the batch)
         committed_items = []
         if new_objects:
             try:
-                self.db.add_all([obj for _, obj in new_objects])
+                self.db.add_all(new_objects)
                 self.db.commit()
-                committed_items = [item for item, _ in new_objects]
+                committed_items = new_objects
                 spider.logger.info(f"Saved {len(new_objects)} items to DB (Batch)")
             except Exception as e:
                 self.db.rollback()
@@ -215,11 +215,11 @@ class DatabasePipeline:
                 )
                 saved = 0
                 quarantined = 0
-                for item, obj in new_objects:
+                for obj in new_objects:
                     try:
                         self.db.add(obj)
                         self.db.commit()
-                        committed_items.append(item)
+                        committed_items.append(obj)
                         saved += 1
                     except Exception as row_err:
                         self.db.rollback()

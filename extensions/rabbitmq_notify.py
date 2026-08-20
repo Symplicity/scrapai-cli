@@ -32,12 +32,30 @@ import signals as scrapai_signals
 
 logger = logging.getLogger(__name__)
 
+# 32 MB max message size
+MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+
 
 def _json_serializer(obj):
     """Fallback serializer for types json.dumps can't handle."""
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _db_item_to_dict(db_item):
+    """Serialize a ScrapedItem ORM object to a plain dict for publishing."""
+    return {
+        "id": db_item.id,
+        "spider_id": db_item.spider_id,
+        "url": db_item.url,
+        "title": db_item.title,
+        "content": db_item.content,
+        "published_date": db_item.published_date,
+        "author": db_item.author,
+        "scraped_at": db_item.scraped_at,
+        "metadata_json": db_item.metadata_json,
+    }
 
 
 class RabbitMQNotifyExtension:
@@ -122,7 +140,7 @@ class RabbitMQNotifyExtension:
             logger.info("RabbitMQ connection closed")
 
     def items_committed(self, items, spider):
-        """Publish each committed item to RabbitMQ after DB write."""
+        """Publish each committed db_item to RabbitMQ after DB write."""
         if not self._ensure_connected():
             logger.error(
                 f"RabbitMQ unavailable, dropping {len(items)} messages"
@@ -132,19 +150,29 @@ class RabbitMQNotifyExtension:
         import pika
 
         published = 0
-        for item in items:
-            message_body = dict(item)
+        skipped = 0
+        for db_item in items:
+            message_body = _db_item_to_dict(db_item)
             message_body["spider"] = spider.name
             message_body["project"] = getattr(spider, "project", None)
 
-            # Remove internal/non-serializable fields
-            message_body.pop("spider_id", None)
+            body_bytes = json.dumps(
+                message_body, default=_json_serializer
+            ).encode()
+
+            if len(body_bytes) > MAX_MESSAGE_BYTES:
+                logger.warning(
+                    f"Skipping oversized message ({len(body_bytes)} bytes) "
+                    f"for {db_item.url}"
+                )
+                skipped += 1
+                continue
 
             try:
                 self.channel.basic_publish(
                     exchange=self.exchange_name,
                     routing_key=self.routing_key,
-                    body=json.dumps(message_body, default=_json_serializer).encode(),
+                    body=body_bytes,
                     properties=pika.BasicProperties(
                         content_type="application/json",
                         delivery_mode=pika.DeliveryMode.Persistent,
@@ -152,14 +180,16 @@ class RabbitMQNotifyExtension:
                 )
                 published += 1
             except Exception as e:
-                logger.warning(f"RabbitMQ publish failed for {item.get('url')}: {e}")
+                logger.warning(f"RabbitMQ publish failed for {db_item.url}: {e}")
                 # Connection likely dead — try to reconnect for remaining items
                 if not self._ensure_connected():
                     logger.error(
                         f"RabbitMQ reconnect failed, dropping remaining "
-                        f"{len(items) - published} messages"
+                        f"{len(items) - published - skipped} messages"
                     )
                     break
 
         if published:
             logger.info(f"Published {published} items to RabbitMQ")
+        if skipped:
+            logger.warning(f"Skipped {skipped} oversized items (>{MAX_MESSAGE_BYTES} bytes)")
