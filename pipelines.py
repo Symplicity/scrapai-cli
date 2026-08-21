@@ -64,6 +64,13 @@ class DatabasePipeline:
         self.db = SessionLocal()
         self.buffer = []
         self.batch_size = 100
+        self.crawler = None
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        pipe = cls()
+        pipe.crawler = crawler
+        return pipe
 
     def process_item(self, item, spider):
         self.buffer.append(item)
@@ -194,10 +201,12 @@ class DatabasePipeline:
             new_objects.append(db_item)
 
         # 3. Bulk Insert (with per-row fallback so one bad row doesn't drop the batch)
+        committed_items = []
         if new_objects:
             try:
                 self.db.add_all(new_objects)
                 self.db.commit()
+                committed_items = new_objects
                 spider.logger.info(f"Saved {len(new_objects)} items to DB (Batch)")
             except Exception as e:
                 self.db.rollback()
@@ -210,6 +219,7 @@ class DatabasePipeline:
                     try:
                         self.db.add(obj)
                         self.db.commit()
+                        committed_items.append(obj)
                         saved += 1
                     except Exception as row_err:
                         self.db.rollback()
@@ -221,5 +231,15 @@ class DatabasePipeline:
                     f"Saved {saved}/{len(new_objects)} items "
                     f"({quarantined} quarantined)"
                 )
+
+        # 4. Emit signal with committed items so extensions (e.g. RabbitMQ) can act post-commit
+        if committed_items and self.crawler:
+            import signals as scrapai_signals
+
+            self.crawler.signals.send_catch_log(
+                scrapai_signals.items_committed,
+                items=committed_items,
+                spider=spider,
+            )
 
         self.buffer = []

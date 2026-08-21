@@ -63,6 +63,19 @@ DELTAFETCH_RESET = False
 HTTPCACHE_ENABLED = False
 HTTPCACHE_EXPIRATION_SECS = 3600
 
+# Extensions
+# RabbitMQ notification: publishes committed items after DB write (requires pika).
+# Enabled only when RABBITMQ_URL is explicitly set in the environment.
+EXTENSIONS = {}
+if os.environ.get("RABBITMQ_URL"):
+    EXTENSIONS["extensions.rabbitmq_notify.RabbitMQNotifyExtension"] = 500
+
+# RabbitMQ settings (only used when extension is enabled)
+RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+RABBITMQ_EXCHANGE = os.environ.get("RABBITMQ_EXCHANGE", "")
+RABBITMQ_ROUTING_KEY = os.environ.get("RABBITMQ_ROUTING_KEY", "scrapai_items")
+RABBITMQ_QUEUE = os.environ.get("RABBITMQ_QUEUE", "scrapai_items")
+
 # Set log level to INFO to prevent printing full items with HTML to console
 LOG_LEVEL = "INFO"
 
