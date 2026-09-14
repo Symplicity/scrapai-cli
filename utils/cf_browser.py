@@ -16,6 +16,46 @@ from cloakbrowser import launch_async
 
 logger = logging.getLogger(__name__)
 
+# Resource types blocked when BROWSER_BLOCK_MEDIA is enabled. These are the
+# heavy, non-essential assets (images, video/audio, fonts) that cost proxy
+# bandwidth without contributing to the extracted DOM. `stylesheet` and
+# `script` are intentionally NOT blocked: Cloudflare's Turnstile challenge
+# needs JS/CSS to run, and blocking them would break the CF bypass.
+_BLOCKED_RESOURCE_TYPES = frozenset({"image", "media", "font"})
+
+
+def block_media_enabled() -> bool:
+    """Whether heavy-resource blocking is enabled via BROWSER_BLOCK_MEDIA.
+
+    Read at browser-start time so a deployment can toggle it purely through the
+    environment — no code change and no per-spider setting required.
+    """
+    return os.getenv("BROWSER_BLOCK_MEDIA", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+async def _block_heavy_resources(route):
+    """Playwright route handler: abort blocked resource types, allow the rest.
+
+    Tolerates provider API differences: some expose ``route.request.resource_type``
+    as an attribute, others as a method. Falls back to continuing the request if
+    the type can't be determined, so blocking never breaks a fetch.
+    """
+    request = getattr(route, "request", None)
+    resource_type = None
+    if request is not None:
+        rt = getattr(request, "resource_type", None)
+        resource_type = rt() if callable(rt) else rt
+
+    if resource_type in _BLOCKED_RESOURCE_TYPES:
+        await route.abort()
+    else:
+        await route.continue_()
+
 
 def random_delay(min_sec: float, max_sec: float) -> float:
     """Generate random delay to mimic human timing variance."""
@@ -127,6 +167,18 @@ class CloudflareBrowserClient:
                 logger.info(f"Loading saved session: {self.session_file}")
             self.context = await self.browser.new_context(**ctx_kwargs)
             self.page = await self.context.new_page()
+
+            # Optionally block heavy resources (images/media/fonts) to cut proxy
+            # bandwidth. Env-driven (BROWSER_BLOCK_MEDIA) so it can be toggled
+            # without code changes. Registered on the context so it applies to
+            # every tab/lane sharing this context. Scripts/CSS still load so the
+            # Cloudflare bypass keeps working.
+            if block_media_enabled():
+                await self.context.route("**/*", _block_heavy_resources)
+                logger.info(
+                    "BROWSER_BLOCK_MEDIA enabled - blocking image/media/font "
+                    "requests (scripts/CSS still load for CF bypass)"
+                )
 
             # Compatibility aliases
             self.driver = self.browser
