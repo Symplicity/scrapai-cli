@@ -543,6 +543,8 @@ def _run_spider(
         spider_class,
         "-a",
         f"spider_name={spider_name}",
+        "-a",
+        f"project={project_name}",
     ]
 
     # Pass proxy type to middleware
