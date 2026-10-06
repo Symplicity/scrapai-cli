@@ -1,0 +1,21 @@
+{
+  "name": "jobfeed",
+  "goal": "Curated job listings from employer career sites",
+  "content_type": "listings",
+  "schema": {
+    "fields": [
+      {"name": "title",                "type": "string",   "required": true,  "core": true},
+      {"name": "description",          "type": "string",   "required": true,  "core": true},
+      {"name": "employer",             "type": "string",   "required": true},
+      {"name": "location",             "type": "string",   "required": true},
+      {"name": "job_id",               "type": "string",   "required": false},
+      {"name": "published_date",       "type": "datetime", "required": false, "core": true},
+      {"name": "hints_position_type",  "type": "string",   "required": false},
+      {"name": "hints_workplace_type", "type": "string",   "required": false},
+      {"name": "hints_job_function",   "type": "string",   "required": false},
+      {"name": "hints_compensation",   "type": "string",   "required": false}
+    ]
+  },
+  "exclusions": [],
+  "created_at": "2026-08-10"
+}

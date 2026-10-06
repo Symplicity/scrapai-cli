@@ -10,6 +10,11 @@ __pycache__/
 archives/
 .archives/
 data/
+# Re-enter data/ project dirs so the project.json exception (added after the
+# global *.json rule below) can take effect; everything else here stays ignored.
+!data/
+!data/*/
+data/*/*/
 */outputs/
 outputs/
 projects/*/outputs/
@@ -40,6 +45,9 @@ pitch/
 # Output files (but keep example configs)
 *.json
 !templates/**/*.json
+# Each project's schema contract must be versioned despite the global *.json
+# ignore above (data/ itself is re-included near the top of this file).
+!data/*/project.json
 !templates/**/*.md
 !templates/**/*.txt
 templates/**/*.html
